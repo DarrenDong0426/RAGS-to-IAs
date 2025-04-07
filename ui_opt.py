@@ -3,7 +3,7 @@ import asyncio
 import nest_asyncio
 from concurrent.futures import ThreadPoolExecutor
 from rag_pipeline import chunk_and_retrieve, retrieve_info, generate_rag_response, model
-from rag_pipeline import convert_from_path, get_top_image, rag_images, generate_caption
+from rag_pipeline import get_top_image, rag_images, generate_caption
 
 # Apply nest_asyncio to allow asyncio to work within Streamlit
 nest_asyncio.apply()
@@ -25,6 +25,9 @@ if "messages" not in st.session_state:
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        if "image" in message:
+            # st.image(message["image"], caption=message["caption"])
+            st.image(message["image"])
 
 async def async_retrieve_info(query, embedding_model, db, docs):
     loop = asyncio.get_event_loop()
@@ -55,35 +58,66 @@ if user_query := st.chat_input("Ask something about the course..."):
     
     # Retrieve relevant docs and generate response
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            # Create containers for text response and image
-            text_container = st.container()
-            image_container = st.container()
+        # with st.spinner("Thinking..."):
+        # Create containers for text response and image
+        text_container = st.container()
+        image_container = st.container()
+        
+
+        # Define the main async function
+        async def process_query():
+            # Start both tasks concurrently
+            docs_task = async_retrieve_info(
+                user_query, embedding_model, KNOWLEDGE_VECTOR_DATABASE, docs_processed
+            )
+            images_task = async_rag_images(user_query)
+            # with st.spinner("Thinking..."):
+            # Await both tasks concurrently
+            retrieved_docs, images = await asyncio.gather(docs_task, images_task)
+            images, top_image_score = images
             
-            # Define the main async function
-            async def process_query():
-                # Start both tasks concurrently
-                docs_task = async_retrieve_info(
-                    user_query, embedding_model, KNOWLEDGE_VECTOR_DATABASE, docs_processed
-                )
-                images_task = async_rag_images(user_query)
-                
-                # Await both tasks concurrently
-                retrieved_docs, images = await asyncio.gather(docs_task, images_task)
-                
-                response = await async_generate_response(user_query, retrieved_docs, model)
-                with text_container:
-                    st.markdown(response)
-                
-                if images and len(images) > 0:
-                    top_img = get_top_image(images)
-                    img_caption = generate_caption(images[0], user_query)
-                    with image_container:
-                        st.image(top_img, caption=img_caption)
-                
-                # Update session state
-                st.session_state.messages.append({"role": "assistant", "content": response})
+            response = await async_generate_response(user_query, retrieved_docs, model)
+            with text_container:
+                st.markdown(response)
             
-            # Run the async function
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(process_query())
+            show_image = None
+            if images and len(images) > 0 and top_image_score > 12:
+                top_img = get_top_image(images)
+                # img_caption = generate_caption(images[0], user_query)
+                with image_container:
+                    st.image(top_img)
+                    show_image = True
+            else: 
+                show_image = False
+            
+            # Update session state
+            if show_image:
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": response, 
+                    "image": top_img 
+                    # "caption": img_caption
+                })
+            else:
+                st.session_state.messages.append({"role": "assistant","content": response})
+            
+        # Run the async function
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(process_query())
+
+# '''
+# ui_opt
+# hi how are you?
+# Who is the professor?
+# Who are the GSIs?
+# When is the discussion and where does it take place?
+# What is KV Cache?
+# How's the grading like?
+# what are the barriers for self-attention?
+# explain what is transformer, encoder, and decoder
+# what is the discussion forum URL?
+# is the sky blue?
+
+# ui: 
+# how to pretrain through language modeling?
+# '''

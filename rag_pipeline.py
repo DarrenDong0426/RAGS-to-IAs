@@ -10,6 +10,11 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores.utils import DistanceStrategy
 
 import google.generativeai as genai
+from byaldi import RAGMultiModalModel
+import matplotlib.pyplot as plt
+from pdf2image import convert_from_path
+import numpy as np
+import json
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -20,10 +25,14 @@ model = genai.GenerativeModel('gemini-2.0-flash-001')
 
 def chunk_and_retrieve():
     RAW_KNOWLEDGE_BASE = []
-    data_paths = ["487w25-syllabus.pdf"]
+    # data_paths = ["487w25-syllabus.pdf"]
+    data_paths = ["487w25-syllabus.pdf", "14-llm.pdf", "13-transformer (1).pdf", "1-introduction.pdf"]
 
     for data_path in data_paths:
         RAW_KNOWLEDGE_BASE.append(LangchainDocument(extract_text(data_path)))
+
+    # jsonl_docs = read_jsonl("NQ-open.train.jsonl")
+    # RAW_KNOWLEDGE_BASE.extend(jsonl_docs)
 
     EMBEDDING_MODEL_NAME = "thenlper/gte-small"
 
@@ -81,16 +90,86 @@ def retrieve_info(user_query, embedding_model, KNOWLEDGE_VECTOR_DATABASE, docs_p
     KNOWLEDGE_VECTOR_DATABASE = FAISS.from_documents(
     docs_processed, embedding_model, distance_strategy=DistanceStrategy.COSINE)
     
-    retrieved_docs = KNOWLEDGE_VECTOR_DATABASE.similarity_search(query=user_query, k=5)
+    retrieved_docs = KNOWLEDGE_VECTOR_DATABASE.similarity_search(query=user_query, k=7)
     return retrieved_docs
 
+    # You are an assistant that answers questions based on the provided information. 
+    # Use only the following context to answer the question. 
+    # If you don't know the answer based on the context, say "I don't have enough information to answer this question."
+    # If the answer to the question is not in context, then output "NOT IN CONTEXT" as the very last sentence.
 def generate_rag_response(query, retrieved_docs, model):
     context = "\n\n".join([doc.page_content for doc in retrieved_docs])
-    
+
     prompt = f"""
-    You are an assistant that answers questions based on the provided information. 
-    Use only the following context to answer the question. If you don't know the answer based on the context, 
-    say "I don't have enough information to answer this question."
+    You are a helpful assistant that answers questions primarily using the provided context. 
+    If the question can't be answered from the context, try to answer without the context using your own knowledge
+    If the question is straightforward or based on common knowledge, you may respond without the given context. 
+    Prioritize the context when it is applicable, conversational answer is more appropriate.
+    
+    CONTEXT: {context}
+    
+    QUESTION: {query}
+
+    ANSWER:
+    """
+    config = {
+        "temperature": 1,
+        "top_p": 0.85,
+        "top_k": 2,
+        "max_output_tokens": 200
+    }
+    
+    response = model.generate_content(prompt, generation_config=config)
+    # if "NOT IN CONTEXT" in response.text:
+    #     prompt_without_context = f"""say "the following isn't from context", then you are an Instructional Assistant in college, response to the QUESTION {query} ANSWER:"""
+    #     response = model.generate_content(prompt_without_context)
+
+    return response.text
+
+
+def convert_pdfs_to_images(pdf_folder):
+    pdf_files = [f for f in os.listdir(pdf_folder) if f.endswith('.pdf')]
+    # pdf_files = [pdf_folder]
+    all_images = {}
+
+    for doc_id, pdf_file in enumerate(pdf_files):
+        pdf_path = os.path.join(pdf_folder, pdf_file)
+        images = convert_from_path(pdf_path)
+        all_images[doc_id] = images
+
+    return all_images
+
+def rag_images(text_query):
+    all_images = convert_pdfs_to_images("data/")
+    # docs_retrieval_model = RAGMultiModalModel.from_pretrained("vidore/colpali-v1.2", device="cpu")
+    # docs_retrieval_model = RAGMultiModalModel.from_index("14-index", device="cpu")
+    docs_retrieval_model = RAGMultiModalModel.from_index("stored_indicies", device="cpu")
+
+    results = docs_retrieval_model.search(text_query, k=3)
+    top_image_score = results[0]['score']
+
+
+    def get_grouped_images(results, all_images):
+        grouped_images = []
+
+        for result in results:
+            doc_id = result['doc_id']
+            page_num = result['page_num']
+            grouped_images.append(all_images[doc_id][page_num - 1])
+        return grouped_images
+
+    grouped_images = get_grouped_images(results, all_images)
+
+    return grouped_images, top_image_score
+
+def get_top_image(group_images):
+    return np.array(group_images[0])
+
+def generate_caption(img, query):
+    context = img
+    prompt = f"""
+    Generate a brief and specific image caption that directly addresses the query. Your caption should:
+    - Be no longer than 1 sentences
 
     CONTEXT: {context}
 
@@ -102,8 +181,36 @@ def generate_rag_response(query, retrieved_docs, model):
         "temperature": 1,
         "top_p": 0.95,
         "top_k": 1,
-        "max_output_tokens": 100
+        "max_output_tokens": 50
     }
     
     response = model.generate_content(prompt, generation_config=config)
     return response.text
+
+
+def read_jsonl(file_path):
+    """Read JSONL file and convert each entry to a LangchainDocument"""
+    documents = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            data = json.loads(line)
+            
+            # Adapt these fields based on your NQ-open format
+            question = data.get('question', '')
+            answers = data.get('answer', [])
+            
+            # Create content by combining question and answers
+            content = f"Question: {question}\nAnswers: {', '.join(answers)}"
+            
+            # Create metadata from other fields if needed
+            metadata = {
+                "source": file_path,
+                "type": "qa_pair",
+                # Add other metadata fields you want to track
+            }
+            
+            # Create LangchainDocument
+            doc = LangchainDocument(page_content=content, metadata=metadata)
+            documents.append(doc)
+    
+    return documents
